@@ -79,6 +79,60 @@ def _open_task_row(task_id, document):
         return None
 
 
+def _fmt_val(v):
+    """Compact value formatting for the diff notation."""
+    if v in (None, ""):
+        return "∅"
+    s = str(v)
+    if len(s) > 40:
+        s = s[:39] + "…"
+    return f'"{s}"' if " " in s else s
+
+
+def _snapshot(document):
+    """Capture the diff-relevant fields of a document."""
+    return {
+        "created": document.created,
+        "corr": document.correspondent.name if document.correspondent else None,
+        "type": document.document_type.name if document.document_type else None,
+        "path": document.storage_path.name if document.storage_path else None,
+        "tags": set(document.tags.values_list("name", flat=True)),
+    }
+
+
+def _diff_result(document_id, before, after, extras):
+    """
+    Build the one-line result diff. Notation:
+      field old→new   changed
+      field =value    detected / kept, unchanged (∅ = empty)
+      tags +a -b      tags added/removed (= if unchanged)
+      [idx wf:… cache]  housekeeping steps that ran; !step = step failed
+    """
+    parts = []
+    for key, label in (
+        ("created", "created"),
+        ("corr", "corr"),
+        ("type", "type"),
+        ("path", "path"),
+    ):
+        b, a = before[key], after[key]
+        if str(b) != str(a):
+            parts.append(f"{label} {_fmt_val(b)}→{_fmt_val(a)}")
+        else:
+            parts.append(f"{label} ={_fmt_val(a)}")
+    added = sorted(after["tags"] - before["tags"])
+    removed = sorted(before["tags"] - after["tags"])
+    tag_bits = [f"+{_fmt_val(t)}" for t in added] + [f"-{_fmt_val(t)}" for t in removed]
+    parts.append("tags " + (" ".join(tag_bits) if tag_bits else "="))
+    return (
+        f"doc {document_id}: "
+        + " | ".join(parts)
+        + " ["
+        + " ".join(extras)
+        + "]"
+    )
+
+
 def _close_task_row(row, ok, result):
     if row is None:
         return
@@ -107,7 +161,8 @@ def full_consume_steps(self, document_id):
 
     document = Document.objects.get(pk=document_id)
     logging_group = uuid.uuid4()
-    summary = []
+    before = _snapshot(document)
+    extras = []
     task_row = _open_task_row(getattr(self.request, "id", None), document)
 
     # -- 1. re-detect the created date from OCR content -----------------
@@ -115,13 +170,12 @@ def full_consume_steps(self, document_id):
         try:
             detected = detect_date(document)
             if detected is not None and detected != document.created:
-                old = document.created
                 document.created = detected
                 # save() (not .update()) so filename handling stays
                 # consistent, same as an edit through the API
                 document.save(update_fields=["created"])
-                summary.append(f"created {old} -> {detected}")
         except Exception:
+            extras.append("!created")
             logger.exception(
                 "reconsume: date re-detection failed for document %s",
                 document_id,
@@ -148,8 +202,8 @@ def full_consume_steps(self, document_id):
                 classifier=classifier,
                 replace=replace,
             )
-            summary.append(name)
         except Exception:
+            extras.append(f"!{name}")
             logger.exception(
                 "reconsume: %s failed for document %s", fn, document_id
             )
@@ -160,8 +214,8 @@ def full_consume_steps(self, document_id):
             handlers.add_inbox_tags(
                 sender=None, document=document, logging_group=logging_group
             )
-            summary.append("inbox_tags")
         except Exception:
+            extras.append("!inbox")
             logger.exception(
                 "reconsume: add_inbox_tags failed for document %s", document_id
             )
@@ -169,8 +223,9 @@ def full_consume_steps(self, document_id):
     # -- 4. search index -------------------------------------------------
     try:
         handlers.add_to_index(sender=None, document=document)
-        summary.append("index")
+        extras.append("idx")
     except Exception:
+        extras.append("!idx")
         logger.exception(
             "reconsume: index update failed for document %s", document_id
         )
@@ -181,13 +236,14 @@ def full_consume_steps(self, document_id):
             handlers.run_workflows_added(
                 sender=None, document=document, logging_group=logging_group
             )
-            summary.append("workflows(added)")
+            extras.append("wf:added")
         elif workflows == "updated":
             handlers.run_workflows_updated(
                 sender=None, document=document, logging_group=logging_group
             )
-            summary.append("workflows(updated)")
+            extras.append("wf:updated")
     except Exception:
+        extras.append("!wf")
         logger.exception(
             "reconsume: workflows failed for document %s", document_id
         )
@@ -197,11 +253,13 @@ def full_consume_steps(self, document_id):
         from documents.caching import clear_document_caches
 
         clear_document_caches(document.pk)
-        summary.append("caches")
+        extras.append("cache")
     except Exception:
         logger.debug("reconsume: cache clearing unavailable", exc_info=True)
 
-    result = f"reconsume document {document_id}: " + ", ".join(summary)
-    logger.info(result)
+    # -- result: compact diff of everything detected/changed -------------
+    after = _snapshot(Document.objects.get(pk=document_id))
+    result = _diff_result(document_id, before, after, extras)
+    logger.info("reconsume %s", result)
     _close_task_row(task_row, ok=True, result=result)
     return result

@@ -166,10 +166,25 @@ You should see `reconsume.tasks.full_consume_steps` in the celery task list at b
 
 ```
 reconsume: reprocess of document 123 finished, queued full consume steps
-reconsume document 123: created 2025-11-08 -> 2022-10-02, correspondent, document_type, tags, storage_path, index, workflows(updated), caches
+reconsume doc 123: created 2025-11-08→2022-10-02 | corr ∅→"Gumroad, Inc." | type =Invoice | path =∅ | tags +tax | [idx wf:updated cache]
 ```
 
-The run also appears as `Reconsume: <title>` in the frontend **File tasks** view.
+The run also appears as `Reconsume: <title>` in the frontend **File tasks** view, with the same diff as its result.
+
+### Result diff notation
+
+Each run reports one compact line describing everything it detected and changed:
+
+| Notation                 | Meaning                                                            |
+| ------------------------ | ------------------------------------------------------------------ |
+| `field old→new`          | value changed (e.g. `created 2025-11-08→2022-10-02`)               |
+| `field =value`           | detected / kept — unchanged                                        |
+| `∅`                      | empty / not set                                                    |
+| `tags +a -b`             | tags added / removed (`tags =` — no change)                        |
+| `[idx wf:updated cache]` | housekeeping steps that ran: search index, workflows, cache clear  |
+| `!step`                  | that step failed (fail-soft; details in the log)                   |
+
+Fields: `created` (document date), `corr` (correspondent), `type` (document type), `path` (storage path), `tags`. Values containing spaces are quoted; long values are truncated with `…`.
 
 ## Troubleshooting
 
