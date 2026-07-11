@@ -30,38 +30,71 @@ class ReconsumeConfig(AppConfig):
         from reconsume import tasks as _tasks  # noqa: F401
 
         from celery import states
-        from celery.signals import task_postrun
+        from celery.signals import before_task_publish, task_postrun, task_prerun
 
-        @task_postrun.connect(weak=False)
-        def _after_reprocess(sender=None, state=None, args=None, kwargs=None, **_):
+        # ONE PaperlessTask row tracks the whole chain (reprocess + follow-up):
+        #   before_task_publish -> PENDING  ("queued" tab, while waiting)
+        #   task_prerun         -> STARTED  ("started" tab, during the OCR,
+        #                                    which can take minutes with force)
+        #   follow-up task      -> SUCCESS with the field diff / FAILURE
+
+        @before_task_publish.connect(weak=False)
+        def _on_reprocess_queued(sender=None, headers=None, body=None, **_):
+            try:
+                if sender != REPROCESS_TASK:
+                    return
+                task_id = (headers or {}).get("id")
+                doc_id = None
+                try:
+                    args, task_kwargs = body[0], body[1]
+                    doc_id = (task_kwargs or {}).get("document_id")
+                    if doc_id is None and args:
+                        doc_id = args[0]
+                except Exception:
+                    doc_id = None
+                if task_id and doc_id is not None:
+                    from reconsume.tasks import create_pending_task_row
+
+                    create_pending_task_row(task_id, doc_id)
+            except Exception:
+                logger.exception("reconsume: publish hook failed (ignored)")
+
+        @task_prerun.connect(weak=False)
+        def _on_reprocess_started(sender=None, task_id=None, **_):
             try:
                 if sender is None or getattr(sender, "name", None) != REPROCESS_TASK:
                     return
-                if state != states.SUCCESS:
+                from reconsume.tasks import mark_task_row_started
+
+                mark_task_row_started(task_id)
+            except Exception:
+                logger.exception("reconsume: prerun hook failed (ignored)")
+
+        @task_postrun.connect(weak=False)
+        def _after_reprocess(
+            sender=None, task_id=None, state=None, args=None, kwargs=None, **_
+        ):
+            try:
+                if sender is None or getattr(sender, "name", None) != REPROCESS_TASK:
                     return
                 doc_id = None
                 if kwargs:
                     doc_id = kwargs.get("document_id")
                 if doc_id is None and args:
                     doc_id = args[0]
+                from reconsume.tasks import fail_task_row, full_consume_steps
+
+                if state != states.SUCCESS:
+                    fail_task_row(task_id, f"reprocess failed (state {state})")
+                    return
                 if doc_id is None:
                     return
-                import uuid
-
-                from reconsume.tasks import create_pending_task_row, full_consume_steps
-
-                # Create the PaperlessTask row BEFORE dispatching, so the run
-                # walks the full lifecycle in the File-tasks UI:
-                # queued (PENDING) -> started -> finished.
-                follow_up_id = str(uuid.uuid4())
-                create_pending_task_row(follow_up_id, doc_id)
-                full_consume_steps.apply_async(
-                    kwargs={"document_id": doc_id},
-                    task_id=follow_up_id,
-                )
+                # Hand the chain row over to the follow-up task, which
+                # finalizes it with the field diff.
+                full_consume_steps.delay(document_id=doc_id, task_row_id=task_id)
                 logger.info(
                     "reconsume: reprocess of document %s finished, "
-                    "queued full consume steps",
+                    "running full consume steps",
                     doc_id,
                 )
             except Exception:

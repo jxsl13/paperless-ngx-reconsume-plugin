@@ -59,34 +59,70 @@ def detect_date(document):
 
 def create_pending_task_row(task_id, document_id):
     """
-    Create the PaperlessTask row at DISPATCH time (status PENDING), so the
-    run walks the full lifecycle in the frontend "File tasks" view:
-    queued -> started -> finished. Called by the hook before apply_async.
-    Fail-soft.
+    Create the PaperlessTask row when the core REPROCESS task is queued
+    (before_task_publish), so one row tracks the whole chain in the
+    frontend "File tasks" view: queued (PENDING) while waiting, started
+    (STARTED) during the — potentially minutes-long — OCR, finished when
+    the follow-up completes. Fail-soft.
     """
     try:
         from celery import states
         from documents.models import Document, PaperlessTask
 
         document = Document.objects.get(pk=document_id)
-        return PaperlessTask.objects.create(
+        row, _created = PaperlessTask.objects.get_or_create(
             task_id=task_id,
-            task_name=PaperlessTask.TaskName.CONSUME_FILE,
-            type=PaperlessTask.TaskType.AUTO,
-            status=states.PENDING,
-            task_file_name=f"Reconsume: {document.title or document.pk}",
-            owner=document.owner,
+            defaults={
+                "task_name": PaperlessTask.TaskName.CONSUME_FILE,
+                "type": PaperlessTask.TaskType.AUTO,
+                "status": states.PENDING,
+                "task_file_name": f"Reconsume: {document.title or document.pk}",
+                "owner": document.owner,
+            },
         )
+        return row
     except Exception:
         logger.debug("reconsume: could not create PaperlessTask row", exc_info=True)
         return None
 
 
-def _open_task_row(task_id, document):
+def mark_task_row_started(task_id):
+    """Reprocess execution begins: PENDING -> STARTED. Fail-soft."""
+    try:
+        from celery import states
+        from django.utils import timezone
+        from documents.models import PaperlessTask
+
+        PaperlessTask.objects.filter(task_id=task_id, status=states.PENDING).update(
+            status=states.STARTED,
+            date_started=timezone.now(),
+        )
+    except Exception:
+        logger.debug("reconsume: could not mark row started", exc_info=True)
+
+
+def fail_task_row(task_id, message):
+    """Core reprocess failed: finalize the row as FAILURE. Fail-soft."""
+    try:
+        from celery import states
+        from django.utils import timezone
+        from documents.models import PaperlessTask
+
+        PaperlessTask.objects.filter(task_id=task_id).update(
+            status=states.FAILURE,
+            date_done=timezone.now(),
+            result=message,
+        )
+    except Exception:
+        logger.debug("reconsume: could not fail row", exc_info=True)
+
+
+def _open_task_row(task_row_id, fallback_task_id, document):
     """
-    Take over the row created at dispatch time and mark it STARTED. If it
-    does not exist (task was dispatched without the hook, e.g. manually),
-    create it on the fly. Fail-soft.
+    Take over the chain row created at reprocess-publish time (it is
+    already STARTED while the OCR ran). If it does not exist (follow-up
+    dispatched without the publish hook, e.g. manually), create one on the
+    fly. Fail-soft.
     """
     try:
         from celery import states
@@ -94,20 +130,23 @@ def _open_task_row(task_id, document):
         from documents.models import PaperlessTask
 
         row = None
-        if task_id:
-            row = PaperlessTask.objects.filter(task_id=task_id).first()
+        if task_row_id:
+            row = PaperlessTask.objects.filter(task_id=task_row_id).first()
         if row is None:
             row = PaperlessTask.objects.create(
-                task_id=task_id or str(uuid.uuid4()),
+                task_id=task_row_id or fallback_task_id or str(uuid.uuid4()),
                 task_name=PaperlessTask.TaskName.CONSUME_FILE,
                 type=PaperlessTask.TaskType.AUTO,
-                status=states.PENDING,
+                status=states.STARTED,
+                date_started=timezone.now(),
                 task_file_name=f"Reconsume: {document.title or document.pk}",
                 owner=document.owner,
             )
-        row.status = states.STARTED
-        row.date_started = timezone.now()
-        row.save(update_fields=["status", "date_started"])
+        elif row.status != states.STARTED:
+            row.status = states.STARTED
+            if row.date_started is None:
+                row.date_started = timezone.now()
+            row.save(update_fields=["status", "date_started"])
         return row
     except Exception:
         logger.debug("reconsume: could not open PaperlessTask row", exc_info=True)
@@ -184,7 +223,7 @@ def _close_task_row(row, ok, result):
 
 
 @shared_task(bind=True)
-def full_consume_steps(self, document_id):
+def full_consume_steps(self, document_id, task_row_id=None):
     from documents.classifier import load_classifier
     from documents.models import Document
     from documents.signals import handlers
@@ -198,7 +237,9 @@ def full_consume_steps(self, document_id):
     logging_group = uuid.uuid4()
     before = _snapshot(document)
     extras = []
-    task_row = _open_task_row(getattr(self.request, "id", None), document)
+    task_row = _open_task_row(
+        task_row_id, getattr(self.request, "id", None), document
+    )
 
     # -- 1. re-detect the created date from OCR content -----------------
     if set_created:
