@@ -16,10 +16,14 @@ structural evidence that works in any language and script:
   +20  position < 1200 chars (top of page 1), +10 extra < 400
   +10..20  the same calendar date repeats in the document
   -40  match embedded in a digit/spec blob (e.g. "AM4/1151/1150/1155")
-  -25  Jan-1 dates (artifacts of month-/year-only matches, dateparser fills
-       missing day/month with 1), -5 other day-1 dates
+  -10  partial date (month/year only, no explicit day) — valid but weaker
+       evidence than a full date; never serves as the recency anchor
   -35  more than 6 years older than the newest clean candidate in the
        document (references to old contracts, laws, birth dates)
+
+Partial dates (month + year, no day — "11.2016", "Oktober 2016") resolve to
+the LAST day of that month via dateparser's PREFER_DAY_OF_MONTH="last",
+which is calendar-aware (February, leap years: "Februar 2024" -> 2024-02-29).
 
 Ties: higher score wins, then earlier position. No candidates -> None
 (the document's date is left untouched).
@@ -47,6 +51,24 @@ TEXTUAL_DATE = re.compile(
 # 1-2 digit day so dateparser sees a clean number. Generic, not localized.
 DAY_SUFFIX = re.compile(rf"\b(\d{{1,2}}){_L}{{1,2}}\b", re.UNICODE)
 
+_MONTH_WORD = re.compile(rf"{_L}{{3,}}", re.UNICODE)
+
+
+def has_day(ds):
+    """
+    Does this date string contain an explicit day-of-month?
+      "31.10.2016"        -> True   (two 1-2 digit groups: day + month)
+      "2. Oktober 2022"   -> True   (1-2 digit group + month word)
+      "October 2nd, 2022" -> True
+      "11.2016", "10/2016"-> False  (single 1-2 digit group = the month)
+      "Oktober 2016"      -> False  (month word + year only)
+    Language-independent: only digit-group counting and letter runs.
+    """
+    small = [g for g in re.findall(r"\d+", ds) if len(g) <= 2]
+    if len(small) >= 2:
+        return True
+    return len(small) >= 1 and _MONTH_WORD.search(ds) is not None
+
 
 def _iter_matches(text):
     """All date-shaped spans: paperless' DATE_REGEX + generic textual dates."""
@@ -73,38 +95,36 @@ def _candidates(text, parse_one):
             noisy = (
                 prev_c.isdigit() or prev_c == "/" or next_c.isdigit() or next_c == "/"
             )
-            yield d, m.start(), noisy
+            yield d, m.start(), noisy, not has_day(m.group(0))
 
 
 def best_date(filename, text, parse_one):
     """Return the most plausible issue date (datetime.date) or None."""
     text = text or ""
     cands = []
-    for d, pos, noisy in _candidates(text, parse_one):
+    for d, pos, noisy, partial in _candidates(text, parse_one):
         if isinstance(d, datetime.datetime):
             d = d.date()
-        cands.append((d, pos, noisy))
+        cands.append((d, pos, noisy, partial))
     # filename candidates count like very early text (paperless checks them too)
     if filename:
-        for d, _, noisy in _candidates(filename, parse_one):
+        for d, _, noisy, partial in _candidates(filename, parse_one):
             if isinstance(d, datetime.datetime):
                 d = d.date()
-            cands.append((d, 0, noisy))
+            cands.append((d, 0, noisy, partial))
     if not cands:
         return None
 
-    def _jan1(d):
-        return d.month == 1 and d.day == 1
-
-    # Jan-1 dates and digit-noise matches never serve as the recency anchor.
-    clean = [d for d, _, noisy in cands if not _jan1(d) and not noisy]
-    newest = max(clean) if clean else max(d for d, _, _n in cands)
+    # Partial (month/year-only) and digit-noise matches never serve as the
+    # recency anchor — they are weaker evidence.
+    clean = [d for d, _, noisy, partial in cands if not partial and not noisy]
+    newest = max(clean) if clean else max(d for d, _, _n, _p in cands)
     freq = {}
-    for d, _, _n in cands:
+    for d, _, _n, _p in cands:
         freq[d] = freq.get(d, 0) + 1
 
     scored = []
-    for d, pos, noisy in cands:
+    for d, pos, noisy, partial in cands:
         before = text[max(0, pos - 8) : pos].rstrip()
         score = 0
         if noisy:
@@ -119,10 +139,8 @@ def best_date(filename, text, parse_one):
         if pos < 400:
             score += 10
         score += min(20, 10 * (freq[d] - 1))
-        if _jan1(d):
-            score -= 25
-        elif d.day == 1:
-            score -= 5
+        if partial:
+            score -= 10
         if (newest - d).days > 6 * 365:
             score -= 35
         scored.append((score, -pos, d))
@@ -142,6 +160,10 @@ def paperless_parse_one():
     language-independent fallback: if the configured locales cannot parse
     a candidate (e.g. an English month name in a German setup), dateparser
     retries with full auto-detection (~200 languages). Deterministic.
+
+    Dates without an explicit day (month/year only) resolve to the LAST day
+    of that month — dateparser's PREFER_DAY_OF_MONTH="last" is calendar-aware
+    (February and leap years included).
     """
     import dateparser
     from django.conf import settings
@@ -159,14 +181,19 @@ def paperless_parse_one():
 
     ignore = getattr(settings, "IGNORE_DATES", ())
     now = timezone.now()
-    dp_settings = {
-        "DATE_ORDER": settings.DATE_ORDER,
-        "PREFER_DAY_OF_MONTH": "first",
-        "RETURN_AS_TIMEZONE_AWARE": True,
-        "TIMEZONE": settings.TIME_ZONE,
-    }
+
+    def _dp_settings(prefer_day):
+        return {
+            "DATE_ORDER": settings.DATE_ORDER,
+            "PREFER_DAY_OF_MONTH": prefer_day,
+            "RETURN_AS_TIMEZONE_AWARE": True,
+            "TIMEZONE": settings.TIME_ZONE,
+        }
 
     def parse_one(ds):
+        # month/year-only dates get the last day of the month
+        prefer_day = "first" if has_day(ds) else "last"
+        dp_settings = _dp_settings(prefer_day)
         ds = DAY_SUFFIX.sub(r"\1", ds)
         d = None
         try:
