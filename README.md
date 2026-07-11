@@ -188,6 +188,42 @@ Each run reports one compact line describing everything it detected and changed:
 
 Fields: `created` (document date), `corr` (correspondent), `type` (document type), `path` (storage path), `tags`. Values containing spaces are quoted; long values are truncated with `…`.
 
+## OCR-mode pitfalls (read this if reprocessing "does nothing")
+
+The plugin can only work with the text that paperless' reprocess produces. Whether reprocess actually generates *new* text is governed by the OCR mode:
+
+| Mode | Behaviour on reprocess |
+|---|---|
+| `skip` | pages that already have a text layer are skipped — reprocess is a **no-op** for previously OCR'd documents |
+| `redo` | replaces existing *OCR* text layers, but does **not** touch pages it considers "born-digital" text — including PDFs with **corrupt embedded text layers** (broken font encodings that extract as garbage like `r§€N7€CEßDECjj7€`) |
+| `force` | rasterizes every page and OCRs from scratch — the only mode that fixes garbage text layers |
+
+### Pitfall 1: the frontend configuration silently overrides your config file
+
+paperless has **two** configuration sources, and the database wins:
+
+```
+frontend "Configuration" page  (stored in the DB)   ← takes precedence
+PAPERLESS_OCR_MODE             (paperless.conf / env)
+```
+
+If an OCR mode was ever saved on the frontend **Configuration** page, changing `PAPERLESS_OCR_MODE` in `paperless.conf` or docker environment **has no effect** — the DB value silently wins, with no warning anywhere.
+
+So to re-OCR documents with broken text layers, set the mode where it actually counts: **frontend → Configuration → OCR → Mode → `force`** (admin permissions required). Alternatively clear the frontend field (set it to empty/default) so your config file applies again — you can verify the effective value with:
+
+```bash
+# inside the paperless environment
+python3 manage.py shell -c "from paperless.config import OcrConfig; print(OcrConfig().mode)"
+```
+
+### Pitfall 2: don't leave `force` on permanently
+
+`force` rasterizes born-digital PDFs too, degrading their perfect vector text to OCR quality. Recommended procedure:
+
+1. Set mode to `force` (frontend Configuration page, see pitfall 1)
+2. Reprocess the affected documents (garbage-content documents typically show `created =…| corr =∅ | type =∅ | tags =` in the reconsume result — nothing detectable in garbage)
+3. Switch back to `redo` afterwards
+
 ## Troubleshooting
 
 | Symptom                             | Cause / fix                                                                                                                         |
@@ -195,6 +231,7 @@ Fields: `created` (document date), `corr` (correspondent), `type` (document type
 | Webserver won't start after install | `PYTHONPATH` not visible to the service → check the drop-in / compose env; `python3 -c "import reconsume"` with that path must work |
 | Hook never fires                    | Task name changed in a newer paperless (check `REPROCESS_TASK` in `apps.py` against `documents/tasks.py`) — adjust the one string   |
 | Date not updated on some document   | No parseable date candidate in the OCR text (check with `journalctl … | grep reconsume`); the plugin never guesses                  |
+| Reprocess changes nothing, content stays garbage | Corrupt embedded text layer + OCR mode effectively `skip`/`redo` — set `force` on the **frontend Configuration page** (it overrides the config file!), reprocess, then revert. See [OCR-mode pitfalls](#ocr-mode-pitfalls-read-this-if-reprocessing-does-nothing) |
 | A step logs an exception            | That step is skipped for that document, everything else still runs — fail-soft by design                                            |
 
 ## Update safety
