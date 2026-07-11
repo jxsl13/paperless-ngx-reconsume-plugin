@@ -46,9 +46,19 @@ class ReconsumeConfig(AppConfig):
                     doc_id = args[0]
                 if doc_id is None:
                     return
-                from reconsume.tasks import full_consume_steps
+                import uuid
 
-                full_consume_steps.delay(document_id=doc_id)
+                from reconsume.tasks import create_pending_task_row, full_consume_steps
+
+                # Create the PaperlessTask row BEFORE dispatching, so the run
+                # walks the full lifecycle in the File-tasks UI:
+                # queued (PENDING) -> started -> finished.
+                follow_up_id = str(uuid.uuid4())
+                create_pending_task_row(follow_up_id, doc_id)
+                full_consume_steps.apply_async(
+                    kwargs={"document_id": doc_id},
+                    task_id=follow_up_id,
+                )
                 logger.info(
                     "reconsume: reprocess of document %s finished, "
                     "queued full consume steps",

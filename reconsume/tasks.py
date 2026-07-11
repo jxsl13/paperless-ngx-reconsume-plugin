@@ -57,25 +57,60 @@ def detect_date(document):
     )
 
 
-def _open_task_row(task_id, document):
-    """Create a PaperlessTask row so the run shows up in the frontend
-    "Dateiaufgaben" view (which lists exactly this table). Fail-soft."""
+def create_pending_task_row(task_id, document_id):
+    """
+    Create the PaperlessTask row at DISPATCH time (status PENDING), so the
+    run walks the full lifecycle in the frontend "File tasks" view:
+    queued -> started -> finished. Called by the hook before apply_async.
+    Fail-soft.
+    """
     try:
         from celery import states
-        from django.utils import timezone
-        from documents.models import PaperlessTask
+        from documents.models import Document, PaperlessTask
 
+        document = Document.objects.get(pk=document_id)
         return PaperlessTask.objects.create(
-            task_id=task_id or str(uuid.uuid4()),
+            task_id=task_id,
             task_name=PaperlessTask.TaskName.CONSUME_FILE,
             type=PaperlessTask.TaskType.AUTO,
-            status=states.STARTED,
-            date_started=timezone.now(),
+            status=states.PENDING,
             task_file_name=f"Reconsume: {document.title or document.pk}",
             owner=document.owner,
         )
     except Exception:
         logger.debug("reconsume: could not create PaperlessTask row", exc_info=True)
+        return None
+
+
+def _open_task_row(task_id, document):
+    """
+    Take over the row created at dispatch time and mark it STARTED. If it
+    does not exist (task was dispatched without the hook, e.g. manually),
+    create it on the fly. Fail-soft.
+    """
+    try:
+        from celery import states
+        from django.utils import timezone
+        from documents.models import PaperlessTask
+
+        row = None
+        if task_id:
+            row = PaperlessTask.objects.filter(task_id=task_id).first()
+        if row is None:
+            row = PaperlessTask.objects.create(
+                task_id=task_id or str(uuid.uuid4()),
+                task_name=PaperlessTask.TaskName.CONSUME_FILE,
+                type=PaperlessTask.TaskType.AUTO,
+                status=states.PENDING,
+                task_file_name=f"Reconsume: {document.title or document.pk}",
+                owner=document.owner,
+            )
+        row.status = states.STARTED
+        row.date_started = timezone.now()
+        row.save(update_fields=["status", "date_started"])
+        return row
+    except Exception:
+        logger.debug("reconsume: could not open PaperlessTask row", exc_info=True)
         return None
 
 
