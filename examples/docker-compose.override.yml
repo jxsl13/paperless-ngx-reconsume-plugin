@@ -1,15 +1,15 @@
-# Example: add paperless-reconsume to the official paperless-ngx compose setup.
+# Example: add paperless-ngx-reconsume-plugin to the official paperless-ngx compose setup.
 #
 # Place this file next to your docker-compose.yml as
 # docker-compose.override.yml (docker compose merges it automatically),
 # or copy the marked lines into your existing service definition.
 #
-# Assumes this repository is cloned to ./paperless-reconsume
+# Assumes this repository is cloned to ./paperless-ngx-reconsume-plugin
 
 services:
   webserver:
     volumes:
-      - ./paperless-reconsume/reconsume:/usr/src/paperless/plugins/reconsume:ro
+      - ./paperless-ngx-reconsume-plugin/reconsume:/usr/src/paperless/plugins/reconsume:ro
     environment:
       PAPERLESS_APPS: "reconsume"
       PYTHONPATH: "/usr/src/paperless/plugins"

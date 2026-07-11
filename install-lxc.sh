@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# paperless-reconsume — bare-metal / LXC installer
+# paperless-ngx-reconsume-plugin — bare-metal / LXC installer
 #
 # Copies the plugin to PLUGIN_DIR, registers it in paperless.conf and adds
 # PYTHONPATH drop-ins to the paperless systemd units. Idempotent.
@@ -28,7 +28,7 @@ if grep -q "^PAPERLESS_APPS=" "$PAPERLESS_CONF"; then
     sed -i 's/^PAPERLESS_APPS=\(.*\)$/PAPERLESS_APPS=\1,reconsume/' "$PAPERLESS_CONF"
   fi
 else
-  printf '\n# paperless-reconsume plugin\nPAPERLESS_APPS=reconsume\n' >> "$PAPERLESS_CONF"
+  printf '\n# paperless-ngx-reconsume-plugin plugin\nPAPERLESS_APPS=reconsume\n' >> "$PAPERLESS_CONF"
 fi
 
 echo "==> Adding PYTHONPATH drop-ins"

@@ -1,4 +1,4 @@
-# paperless-reconsume
+# paperless-ngx-reconsume-plugin
 
 **Full re-consume for [paperless-ngx](https://github.com/paperless-ngx/paperless-ngx) — turn "Reprocess" into a complete consume pipeline.**
 
@@ -42,15 +42,15 @@ reconsume hook  ──►  reconsume.tasks.full_consume_steps
 
 paperless picks the **first** regex match in the document — which is frequently a birth date, a footer date, or a referenced old year. This plugin scores **every** date candidate instead, using only **structural, language-independent evidence** (no hardcoded keywords in any language):
 
-| Signal | Score |
-|---|---|
-| `:` directly before the date (label syntax in any script: `Datum:`, `Date:`, `日付：`) | +20 |
-| `,` directly before (letter-head style `<City>, <date>`) | +10 |
-| Position in the first ~1200 chars (top of page 1) | +20 (+10 more < 400) |
-| Same calendar date repeated in the document | +10…+20 |
-| Embedded in a digit/spec blob (`AM4/1151/1150/1155` → phantom dates) | −40 |
-| January 1 (artifact of month/year-only matches) | −25 (other day-1: −5) |
-| More than 6 years older than the newest clean date in the document (old references, birth dates) | −35 |
+| Signal                                                                                           | Score                 |
+| ------------------------------------------------------------------------------------------------ | --------------------- |
+| `:` directly before the date (label syntax in any script: `Datum:`, `Date:`, `日付：`)           | +20                   |
+| `,` directly before (letter-head style `<City>, <date>`)                                         | +10                   |
+| Position in the first ~1200 chars (top of page 1)                                                | +20 (+10 more < 400)  |
+| Same calendar date repeated in the document                                                      | +10…+20               |
+| Embedded in a digit/spec blob (`AM4/1151/1150/1155` → phantom dates)                             | −40                   |
+| January 1 (artifact of month/year-only matches)                                                  | −25 (other day-1: −5) |
+| More than 6 years older than the newest clean date in the document (old references, birth dates) | −35                   |
 
 Candidate extraction combines paperless' own `DATE_REGEX` with a generic textual-date pattern (any unicode letters, generic day suffixes) so formats like `October 2nd, 2022` or `2. Oktober 2022` are found regardless of your OCR language. Parsing is done by [`dateparser`](https://github.com/scrapinghub/dateparser) — first with your configured paperless locale settings, then with full auto-detection (~200 languages) as fallback. Fully deterministic: same input → same output.
 
@@ -72,7 +72,7 @@ The official paperless-ngx image runs webserver, consumer, worker and scheduler 
 1. Clone this repository next to your `docker-compose.yml`:
 
    ```bash
-   git clone https://github.com/<you>/paperless-reconsume.git
+   git clone https://github.com/<you>/paperless-ngx-reconsume-plugin.git
    ```
 
 2. Add the mount and the environment variables to the `webserver` service:
@@ -84,7 +84,7 @@ The official paperless-ngx image runs webserver, consumer, worker and scheduler 
        # ... your existing config ...
        volumes:
          # ... your existing volumes ...
-         - ./paperless-reconsume/reconsume:/usr/src/paperless/plugins/reconsume:ro
+         - ./paperless-ngx-reconsume-plugin/reconsume:/usr/src/paperless/plugins/reconsume:ro
        environment:
          # ... your existing environment ...
          PAPERLESS_APPS: "reconsume"
@@ -110,7 +110,7 @@ For installs where paperless runs via systemd units (e.g. in a Proxmox LXC conta
 1. Clone the plugin **outside** the paperless source tree:
 
    ```bash
-   git clone https://github.com/<you>/paperless-reconsume.git /opt/paperless/plugins-repo
+   git clone https://github.com/<you>/paperless-ngx-reconsume-plugin.git /opt/paperless/plugins-repo
    ln -s /opt/paperless/plugins-repo/reconsume /opt/paperless/plugins/reconsume
    # or simply copy: mkdir -p /opt/paperless/plugins && cp -r /opt/paperless/plugins-repo/reconsume /opt/paperless/plugins/
    ```
@@ -143,13 +143,13 @@ For installs where paperless runs via systemd units (e.g. in a Proxmox LXC conta
 
 All optional, set as environment variables (docker) or in `paperless.conf` (bare metal):
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `RECONSUME_SET_CREATED` | `true` | Re-detect the document date from OCR text |
-| `RECONSUME_DATE_STRATEGY` | `heuristic` | `heuristic` = scored selection (see above) · `first` = paperless' original first-match behaviour |
-| `RECONSUME_REPLACE` | `false` | `true` = matching may overwrite existing correspondent/type/tags · `false` = only fill empty fields (like consume on a fresh document) |
-| `RECONSUME_ADD_INBOX_TAGS` | `false` | Re-add inbox tags, exactly like a fresh consume |
-| `RECONSUME_RUN_WORKFLOWS` | `updated` | Which workflow trigger to fire: `added` · `updated` · `none` |
+| Variable                   | Default     | Meaning                                                                                                                                |
+| -------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `RECONSUME_SET_CREATED`    | `true`      | Re-detect the document date from OCR text                                                                                              |
+| `RECONSUME_DATE_STRATEGY`  | `heuristic` | `heuristic` = scored selection (see above) · `first` = paperless' original first-match behaviour                                       |
+| `RECONSUME_REPLACE`        | `false`     | `true` = matching may overwrite existing correspondent/type/tags · `false` = only fill empty fields (like consume on a fresh document) |
+| `RECONSUME_ADD_INBOX_TAGS` | `false`     | Re-add inbox tags, exactly like a fresh consume                                                                                        |
+| `RECONSUME_RUN_WORKFLOWS`  | `updated`   | Which workflow trigger to fire: `added` · `updated` · `none`                                                                           |
 
 ## Verifying the installation
 
@@ -173,12 +173,12 @@ The run also appears as `Reconsume: <title>` in the frontend **File tasks** view
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
-|---|---|
+| Symptom                             | Cause / fix                                                                                                                         |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | Webserver won't start after install | `PYTHONPATH` not visible to the service → check the drop-in / compose env; `python3 -c "import reconsume"` with that path must work |
-| Hook never fires | Task name changed in a newer paperless (check `REPROCESS_TASK` in `apps.py` against `documents/tasks.py`) — adjust the one string |
-| Date not updated on some document | No parseable date candidate in the OCR text (check with `journalctl … | grep reconsume`); the plugin never guesses |
-| A step logs an exception | That step is skipped for that document, everything else still runs — fail-soft by design |
+| Hook never fires                    | Task name changed in a newer paperless (check `REPROCESS_TASK` in `apps.py` against `documents/tasks.py`) — adjust the one string   |
+| Date not updated on some document   | No parseable date candidate in the OCR text (check with `journalctl … | grep reconsume`); the plugin never guesses                  |
+| A step logs an exception            | That step is skipped for that document, everything else still runs — fail-soft by design                                            |
 
 ## Update safety
 
