@@ -29,6 +29,7 @@ Ties: higher score wins, then earlier position. No candidates -> None
 (the document's date is left untouched).
 """
 
+import calendar
 import datetime
 import logging
 import re
@@ -52,6 +53,27 @@ TEXTUAL_DATE = re.compile(
 DAY_SUFFIX = re.compile(rf"\b(\d{{1,2}}){_L}{{1,2}}\b", re.UNICODE)
 
 _MONTH_WORD = re.compile(rf"{_L}{{3,}}", re.UNICODE)
+
+# Purely numeric month+year ("11.2016", "10/2016", "2016-11"). dateparser
+# would misread these as day+year and fill in the CURRENT month — handle
+# them explicitly and deterministically instead.
+_NUM_MONTH_YEAR = re.compile(r"^\s*(?:(\d{1,2})\s*[./-]\s*(\d{4})|(\d{4})\s*[./-]\s*(\d{1,2}))\s*$")
+
+
+def _parse_numeric_month_year(ds):
+    """Return an aware datetime for MM.YYYY / YYYY-MM strings (last day of
+    month, leap-year aware via calendar.monthrange), else None."""
+    m = _NUM_MONTH_YEAR.match(ds)
+    if not m:
+        return None
+    if m.group(1) is not None:
+        month, year = int(m.group(1)), int(m.group(2))
+    else:
+        year, month = int(m.group(3)), int(m.group(4))
+    if not 1 <= month <= 12:
+        return None
+    last = calendar.monthrange(year, month)[1]
+    return datetime.datetime(year, month, last, tzinfo=datetime.timezone.utc)
 
 
 def has_day(ds):
@@ -191,18 +213,21 @@ def paperless_parse_one():
         }
 
     def parse_one(ds):
-        # month/year-only dates get the last day of the month
-        prefer_day = "first" if has_day(ds) else "last"
-        dp_settings = _dp_settings(prefer_day)
-        ds = DAY_SUFFIX.sub(r"\1", ds)
-        d = None
-        try:
-            d = dateparser.parse(ds, settings=dp_settings, locales=languages)
-            if d is None and languages:
-                # language-independent fallback: auto-detect locale
-                d = dateparser.parse(ds, settings=dp_settings)
-        except Exception:
-            return None
+        # numeric MM.YYYY / YYYY-MM: deterministic month-end, bypassing
+        # dateparser's current-month filling
+        d = _parse_numeric_month_year(ds)
+        if d is None:
+            # month/year-only dates get the last day of the month
+            prefer_day = "first" if has_day(ds) else "last"
+            dp_settings = _dp_settings(prefer_day)
+            ds = DAY_SUFFIX.sub(r"\1", ds)
+            try:
+                d = dateparser.parse(ds, settings=dp_settings, locales=languages)
+                if d is None and languages:
+                    # language-independent fallback: auto-detect locale
+                    d = dateparser.parse(ds, settings=dp_settings)
+            except Exception:
+                return None
         if d is None or d.year <= 1900 or d > now or d.date() in ignore:
             return None
         return d
