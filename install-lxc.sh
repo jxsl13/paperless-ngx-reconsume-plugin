@@ -28,7 +28,7 @@ if grep -q "^PAPERLESS_APPS=" "$PAPERLESS_CONF"; then
     sed -i 's/^PAPERLESS_APPS=\(.*\)$/PAPERLESS_APPS=\1,reconsume/' "$PAPERLESS_CONF"
   fi
 else
-  printf '\n# paperless-ngx-reconsume-plugin plugin\nPAPERLESS_APPS=reconsume\n' >> "$PAPERLESS_CONF"
+  printf '\n# paperless-ngx-reconsume-plugin\nPAPERLESS_APPS=reconsume\n' >> "$PAPERLESS_CONF"
 fi
 
 echo "==> Adding PYTHONPATH drop-ins"
