@@ -238,7 +238,18 @@ def full_consume_steps(self, document_id, task_row_id=None):
     add_inbox = _flag("RECONSUME_ADD_INBOX_TAGS", False)
     workflows = os.getenv("RECONSUME_RUN_WORKFLOWS", "updated").strip().lower()
 
-    document = Document.objects.get(pk=document_id)
+    try:
+        document = Document.objects.get(pk=document_id)
+    except Document.DoesNotExist:
+        # Document was deleted (trash) between dispatch and execution —
+        # close the chain row cleanly instead of crashing.
+        msg = (
+            f"document {document_id} no longer exists "
+            "(deleted/trashed during reprocess) — nothing to do"
+        )
+        logger.warning("reconsume: %s", msg)
+        fail_task_row(task_row_id, msg)
+        return msg
     logging_group = uuid.uuid4()
     before = _snapshot(document)
     extras = []
