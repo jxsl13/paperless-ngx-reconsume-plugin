@@ -38,6 +38,14 @@ class ReconsumeConfig(AppConfig):
         #   task_prerun         -> STARTED  ("started" tab, during the OCR,
         #                                    which can take minutes with force)
         #   follow-up task      -> SUCCESS with the field diff / FAILURE
+        #
+        # The row's task_id is PREFIXED ("reconsume:<celery id>") so it never
+        # matches a real celery task id — paperless' own task_postrun_handler
+        # updates any row whose task_id matches the finished task and would
+        # otherwise clobber ours (IntegrityError on state=None crashes).
+
+        def _row_id(task_id):
+            return f"reconsume:{task_id}"
 
         @before_task_publish.connect(weak=False)
         def _on_reprocess_queued(sender=None, headers=None, body=None, **_):
@@ -56,7 +64,7 @@ class ReconsumeConfig(AppConfig):
                 if task_id and doc_id is not None:
                     from reconsume.tasks import create_pending_task_row
 
-                    create_pending_task_row(task_id, doc_id)
+                    create_pending_task_row(_row_id(task_id), doc_id)
             except Exception:
                 logger.exception("reconsume: publish hook failed (ignored)")
 
@@ -67,7 +75,7 @@ class ReconsumeConfig(AppConfig):
                     return
                 from reconsume.tasks import mark_task_row_started
 
-                mark_task_row_started(task_id)
+                mark_task_row_started(_row_id(task_id))
             except Exception:
                 logger.exception("reconsume: prerun hook failed (ignored)")
 
@@ -86,13 +94,20 @@ class ReconsumeConfig(AppConfig):
                 from reconsume.tasks import fail_task_row, full_consume_steps
 
                 if state != states.SUCCESS:
-                    fail_task_row(task_id, f"reprocess failed (state {state})")
+                    fail_task_row(
+                        _row_id(task_id),
+                        f"reprocess did not complete (state {state}) — "
+                        "typically killed mid-OCR (worker restart/shutdown); "
+                        "run reprocess again",
+                    )
                     return
                 if doc_id is None:
                     return
                 # Hand the chain row over to the follow-up task, which
                 # finalizes it with the field diff.
-                full_consume_steps.delay(document_id=doc_id, task_row_id=task_id)
+                full_consume_steps.delay(
+                    document_id=doc_id, task_row_id=_row_id(task_id)
+                )
                 logger.info(
                     "reconsume: reprocess of document %s finished, "
                     "running full consume steps",
