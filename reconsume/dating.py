@@ -25,6 +25,11 @@ Partial dates (month + year, no day — "11.2016", "Oktober 2016") resolve to
 the LAST day of that month via dateparser's PREFER_DAY_OF_MONTH="last",
 which is calendar-aware (February, leap years: "Februar 2024" -> 2024-02-29).
 
+Year-only fallback: if NO month/day candidate parses anywhere, standalone
+past years resolve to Dec 31 of that year ("Steuerbescheinigung 2019" ->
+2019-12-31), picked with the same structural scoring. The current year is
+excluded (its Dec 31 lies in the future).
+
 Ties: higher score wins, then earlier position. No candidates -> None
 (the document's date is left untouched).
 """
@@ -120,8 +125,42 @@ def _candidates(text, parse_one):
             yield d, m.start(), noisy, not has_day(m.group(0))
 
 
+# Standalone 4-digit years ("Steuerbescheinigung 2019"). Only used as the
+# LAST fallback tier when no month/day candidate parses anywhere.
+YEAR_ONLY = re.compile(r"(?<![\d./-])((?:19|20)\d{2})(?![\d./-])")
+
+
+def _today():
+    try:
+        from django.utils import timezone
+
+        return timezone.localdate()
+    except Exception:
+        return datetime.date.today()
+
+
+def _year_only_candidates(text):
+    """
+    Fallback tier: every standalone past year resolves to Dec 31 of that
+    year ("2019" -> 2019-12-31). Years whose Dec 31 lies in the future
+    (i.e. the current year) are excluded — only past years qualify.
+    """
+    today = _today()
+    for m in YEAR_ONLY.finditer(text):
+        d = datetime.date(int(m.group(1)), 12, 31)
+        if d.year <= 1900 or d > today:
+            continue
+        yield d, m.start(), False, True  # never noisy (guarded by regex), partial
+
+
 def best_date(filename, text, parse_one):
-    """Return the most plausible issue date (datetime.date) or None."""
+    """
+    Return the most plausible issue date (datetime.date) or None.
+
+    Two tiers: candidates with at least a month (primary) always win over
+    the year-only fallback — a bare year is only used when nothing better
+    exists anywhere in the document or filename.
+    """
     text = text or ""
     cands = []
     for d, pos, noisy, partial in _candidates(text, parse_one):
@@ -134,6 +173,12 @@ def best_date(filename, text, parse_one):
             if isinstance(d, datetime.datetime):
                 d = d.date()
             cands.append((d, 0, noisy, partial))
+
+    if not cands:
+        # fallback tier: standalone past years -> Dec 31 of that year
+        cands = list(_year_only_candidates(text))
+        if not cands and filename:
+            cands = [(d, 0, n, p) for d, _, n, p in _year_only_candidates(filename)]
     if not cands:
         return None
 

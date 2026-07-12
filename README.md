@@ -54,6 +54,8 @@ paperless picks the **first** regex match in the document — which is frequentl
 
 Partial dates resolve to the **last day of that month** (`Oktober 2016` → `2016-10-31`), calendar-aware including February and leap years (`Februar 2024` → `2024-02-29`). Whether a day is present is detected structurally (digit-group counting), not by language.
 
+**Year-only fallback:** if no month/day candidate parses anywhere in the document or filename, standalone **past** years resolve to **Dec 31 of that year** — a yearly tax statement mentioning only `2019` gets `2019-12-31`. Multiple years compete through the same structural scoring (frequency, position). The current year is excluded, since its Dec 31 lies in the future.
+
 Candidate extraction combines paperless' own `DATE_REGEX` with a generic textual-date pattern (any unicode letters, generic day suffixes) so formats like `October 2nd, 2022` or `2. Oktober 2022` are found regardless of your OCR language. Parsing is done by [`dateparser`](https://github.com/scrapinghub/dateparser) — first with your configured paperless locale settings, then with full auto-detection (~200 languages) as fallback. Fully deterministic: same input → same output.
 
 Ties break by score, then by earliest position. If no candidate is found, the document's date is left untouched.
