@@ -271,8 +271,11 @@ def _candidates(text, parse_one):
             prev2_c = text[start - 2] if start > 1 else " "
             next_c = text[end] if end < len(text) else " "
             # embedded in a digit/spec blob ("AM4/1151/1150/1155"), glued
-            # to an identifier ("ISA-25.11.2017"), or barcode-fenced
-            # ("*13.05.26*")
+            # to an identifier ("ISA-25.11.2017"), barcode-fenced
+            # ("*13.05.26*"), or parenthesized — "(Fassung Jan. 2015)",
+            # "(BGBl. ...)", "(01.06.2023 - 30.06.2023)": parentheses are
+            # the universal typographic marker for SECONDARY information,
+            # never a document's own dateline
             noisy = (
                 prev_c.isdigit()
                 or prev_c == "/"
@@ -280,6 +283,8 @@ def _candidates(text, parse_one):
                 or next_c == "/"
                 or prev_c in _GLUE_CHARS
                 or next_c in _GLUE_CHARS
+                or prev_c == "("
+                or next_c == ")"
                 or (prev_c in "-._" and prev2_c.isalnum())
             )
             yield {
@@ -432,11 +437,17 @@ def best_date(filename, text, parse_one):
             # only when colon/comma didn't already flag a label (those
             # signals are redundant with line isolation, not additive)
         s += min(20, 10 * (cluster_count.get(d, 1) - 1))
+        # The defensive dateline bonus never protects a date the user's
+        # own file naming contradicts on the YEAR — that combination
+        # (filename says 2023-06, candidate says June 2022) is the
+        # signature of an OCR digit misread, not a genuine dateline.
+        fn_years = {fd.year for fd, fs, _fp in fcands if fs}
         if (
             dominant is not None
             and d != dominant
             and cluster_count.get(d, 1) == 1
             and c["pos"] < first_pos[dominant]
+            and (not fn_years or d.year in fn_years)
         ):
             s += 40  # one-off dateline ahead of a restated deadline
         if c["partial"]:
