@@ -127,7 +127,10 @@ def _candidates(text, parse_one):
 
 # Standalone 4-digit years ("Steuerbescheinigung 2019"). Only used as the
 # LAST fallback tier when no month/day candidate parses anywhere.
-YEAR_ONLY = re.compile(r"(?<![\d./-])((?:19|20)\d{2})(?![\d./-])")
+# Excluded when part of a longer number, a date ("31.12.2019", "2019-05")
+# or an amount ("2019,50") — i.e. when a digit follows the separator.
+# "Zinsbescheinigung_2021.pdf" stays valid (".p" is not ".<digit>").
+YEAR_ONLY = re.compile(r"(?<![\d.,/-])((?:19|20)\d{2})(?!\d)(?![.,/-]\d)")
 
 
 def _today():
