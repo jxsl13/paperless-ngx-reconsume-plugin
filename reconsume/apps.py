@@ -12,6 +12,7 @@ nothing in core can break because of this app.
 """
 
 import logging
+import os
 
 from django.apps import AppConfig
 
@@ -100,3 +101,46 @@ class ReconsumeConfig(AppConfig):
             except Exception:
                 # Never let the hook break the worker.
                 logger.exception("reconsume: hook failed (ignored)")
+
+        # --- upgrade date detection for NORMAL consumption ----------------
+        # The consumer calls parse_date() only when the user supplied no
+        # explicit date (overrides win upstream), so replacing it at runtime
+        # upgrades exactly the automatic detection — nothing else. Fail-soft:
+        # on any error the original parse_date answers. Kill switch:
+        # RECONSUME_UPGRADE_CONSUME_DATE=false.
+        if os.getenv("RECONSUME_UPGRADE_CONSUME_DATE", "true").strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            try:
+                import datetime as _dt
+
+                from documents import consumer as _consumer_mod
+
+                _original_parse_date = _consumer_mod.parse_date
+
+                def _heuristic_parse_date(filename, text):
+                    try:
+                        from reconsume.dating import best_date, paperless_parse_one
+
+                        d = best_date(
+                            filename or "", text or "", paperless_parse_one()
+                        )
+                        if d is not None:
+                            # aware datetime at 12:00 UTC — DateField-safe in
+                            # every timezone (no midnight day-shift)
+                            return _dt.datetime.combine(
+                                d, _dt.time(12, 0), tzinfo=_dt.timezone.utc
+                            )
+                    except Exception:
+                        logger.exception(
+                            "reconsume: consume-date heuristic failed, "
+                            "falling back to stock parse_date"
+                        )
+                    return _original_parse_date(filename, text)
+
+                _consumer_mod.parse_date = _heuristic_parse_date
+                logger.info("reconsume: consumer date detection upgraded")
+            except Exception:
+                logger.exception(
+                    "reconsume: could not upgrade consumer date detection (ignored)"
+                )

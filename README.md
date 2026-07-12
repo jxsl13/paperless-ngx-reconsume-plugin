@@ -38,6 +38,8 @@ reconsume hook  ──►  reconsume.tasks.full_consume_steps
 
 **Coupling to paperless internals is a single string** — the name of the core reprocess task. If a future paperless version renames it, the hook simply never fires; nothing breaks. Every pipeline step is individually wrapped in `try/except` (fail-soft): if an internal API changes, that step logs an error and the rest continues.
 
+**Normal consumption benefits too:** by default the plugin also replaces the stock first-match date detection during regular consumption of *new* documents (runtime patch of the consumer's `parse_date`, no file modified). Explicit dates supplied by the user bypass the detector entirely, so nothing you set manually is ever overridden. On any error the original detector answers. Disable with `RECONSUME_UPGRADE_CONSUME_DATE=false`.
+
 ## The date heuristic
 
 paperless picks the **first** regex match in the document — which is frequently a birth date, a footer date, or a referenced old year. This plugin scores **every** date candidate instead, using only **structural, language-independent evidence** (no hardcoded keywords in any language):
@@ -154,6 +156,7 @@ All optional, set as environment variables (docker) or in `paperless.conf` (bare
 | `RECONSUME_REPLACE`        | `false`     | `true` = matching may overwrite existing correspondent/type/tags · `false` = only fill empty fields (like consume on a fresh document) |
 | `RECONSUME_ADD_INBOX_TAGS` | `false`     | Re-add inbox tags, exactly like a fresh consume                                                                                        |
 | `RECONSUME_RUN_WORKFLOWS`  | `updated`   | Which workflow trigger to fire: `added` · `updated` · `none`                                                                           |
+| `RECONSUME_UPGRADE_CONSUME_DATE` | `true` | Also use the scored date heuristic during **normal consumption** of new documents (replaces the stock first-match `parse_date` at runtime, fail-soft). User-supplied dates always win — the consumer only calls the detector when no explicit date was provided. |
 
 ## Verifying the installation
 
