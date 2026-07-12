@@ -117,6 +117,51 @@ class ReconsumeConfig(AppConfig):
                 # Never let the hook break the worker.
                 logger.exception("reconsume: hook failed (ignored)")
 
+        # --- reliability: interrupted reprocess tasks auto-resume ---------
+        # paperless' celery defaults ack tasks BEFORE execution, so a task
+        # killed mid-OCR (worker restart, OOM, crash) is simply lost and
+        # never retried. With acks_late + reject_on_worker_lost the broker
+        # redelivers it: immediately on a clean shutdown, or after the
+        # redis visibility timeout (default 1h) on a hard kill. Both the
+        # reprocess task and our follow-up are idempotent, so redelivery
+        # is safe. prefetch=1 stops one worker from hoarding (and losing)
+        # a batch of queued tasks. Kill switch:
+        # RECONSUME_RELIABLE_REPROCESS=false.
+        if os.getenv("RECONSUME_RELIABLE_REPROCESS", "true").strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            try:
+                from celery import current_app
+
+                current_app.conf.worker_prefetch_multiplier = 1
+
+                def _harden_tasks(app):
+                    hardened = []
+                    for name in (
+                        REPROCESS_TASK,
+                        "reconsume.tasks.full_consume_steps",
+                    ):
+                        t = app.tasks.get(name)
+                        if t is not None:
+                            t.acks_late = True
+                            t.reject_on_worker_lost = True
+                            hardened.append(name.rsplit(".", 1)[-1])
+                    if hardened:
+                        logger.info(
+                            "reconsume: reliability (acks_late) enabled for %s",
+                            ", ".join(hardened),
+                        )
+
+                _harden_tasks(current_app)
+
+                @current_app.on_after_finalize.connect(weak=False)
+                def _harden_late(sender=None, **_):
+                    _harden_tasks(sender or current_app)
+            except Exception:
+                logger.exception(
+                    "reconsume: could not enable reliability (ignored)"
+                )
+
         # --- upgrade date detection for NORMAL consumption ----------------
         # The consumer calls parse_date() only when the user supplied no
         # explicit date (overrides win upstream), so replacing it at runtime

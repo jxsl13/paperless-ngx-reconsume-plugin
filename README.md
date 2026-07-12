@@ -157,6 +157,29 @@ All optional, set as environment variables (docker) or in `paperless.conf` (bare
 | `RECONSUME_ADD_INBOX_TAGS` | `false`     | Re-add inbox tags, exactly like a fresh consume                                                                                        |
 | `RECONSUME_RUN_WORKFLOWS`  | `updated`   | Which workflow trigger to fire: `added` · `updated` · `none`                                                                           |
 | `RECONSUME_UPGRADE_CONSUME_DATE` | `true` | Also use the scored date heuristic during **normal consumption** of new documents (replaces the stock first-match `parse_date` at runtime, fail-soft). User-supplied dates always win — the consumer only calls the detector when no explicit date was provided. |
+| `RECONSUME_RELIABLE_REPROCESS` | `true` | Make reprocess survive worker kills: `acks_late` + `reject_on_worker_lost` on the reprocess chain, prefetch 1. Interrupted tasks are redelivered automatically — immediately on clean shutdown, after the redis visibility timeout (default 1 h) on a hard kill. |
+
+### Reliability & memory for big queues
+
+paperless' celery defaults **ack tasks before execution** — a task killed mid-OCR (worker restart, OOM, crash) is silently lost, and up to `4 × workers` prefetched queue entries die with it. With `RECONSUME_RELIABLE_REPROCESS` (default on) the plugin flips the reprocess chain to late acknowledgement, so interrupted work **resumes automatically**. Both tasks are idempotent; a redelivered run just redoes the same OCR.
+
+For memory, mass-reprocessing with `force` is the worst case (every page rasterized). Recommended paperless settings for bounded memory:
+
+```ini
+PAPERLESS_TASK_WORKERS=4              # parallel OCRs — size to RAM/1.2GB, not to cores
+PAPERLESS_CONVERT_MEMORY_LIMIT=256    # ImageMagick spills to disk beyond this (MiB)
+PAPERLESS_OCR_MAX_IMAGE_PIXELS=89478485   # skip decompression-bomb images
+```
+
+Plus a systemd guard so a runaway worker can never take down redis/postgres/webserver in the same container (drop-in for the task-queue unit):
+
+```ini
+[Service]
+MemoryHigh=4G     # kernel throttles the worker here
+MemoryMax=5G      # hard cap — worker is killed, task redelivers, rest survives
+```
+
+With `acks_late` active, even a `MemoryMax` kill is self-healing: the task redelivers and, with prefetch 1 and fewer parallel OCRs, usually succeeds on the second attempt.
 
 ## Verifying the installation
 
