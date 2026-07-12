@@ -158,6 +158,7 @@ All optional, set as environment variables (docker) or in `paperless.conf` (bare
 | `RECONSUME_RUN_WORKFLOWS`  | `updated`   | Which workflow trigger to fire: `added` · `updated` · `none`                                                                           |
 | `RECONSUME_UPGRADE_CONSUME_DATE` | `true` | Also use the scored date heuristic during **normal consumption** of new documents (replaces the stock first-match `parse_date` at runtime, fail-soft). User-supplied dates always win — the consumer only calls the detector when no explicit date was provided. |
 | `RECONSUME_RELIABLE_REPROCESS` | `true` | Make reprocess survive worker kills: `acks_late` + `reject_on_worker_lost` on the reprocess chain, prefetch 1. Interrupted tasks are redelivered automatically — immediately on clean shutdown, after the redis visibility timeout (default 1 h) on a hard kill. |
+| `RECONSUME_INLINE_FOLLOWUP` | `true` | Run the post-OCR pipeline inline right after each reprocess (~1 s, same worker slot). `false` dispatches it as a queued task instead — which during bulk runs starves behind every queued OCR, so no document gets its date/matching until the whole batch drains. |
 
 ### Reliability & memory for big queues
 

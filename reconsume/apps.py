@@ -103,16 +103,33 @@ class ReconsumeConfig(AppConfig):
                     return
                 if doc_id is None:
                     return
-                # Hand the chain row over to the follow-up task, which
-                # finalizes it with the field diff.
-                full_consume_steps.delay(
-                    document_id=doc_id, task_row_id=_row_id(task_id)
-                )
                 logger.info(
                     "reconsume: reprocess of document %s finished, "
                     "running full consume steps",
                     doc_id,
                 )
+                # Run the follow-up INLINE (~1s), right here in the same
+                # worker slot. Dispatching it with .delay() puts it at the
+                # BACK of the celery queue — behind every still-queued
+                # reprocess task — so during bulk runs no document ever got
+                # its date/matching/row-close until the whole OCR queue had
+                # drained. Set RECONSUME_INLINE_FOLLOWUP=false to restore
+                # queued dispatch.
+                if os.getenv(
+                    "RECONSUME_INLINE_FOLLOWUP", "true"
+                ).strip().lower() in ("1", "true", "yes", "on"):
+                    try:
+                        full_consume_steps(
+                            document_id=doc_id, task_row_id=_row_id(task_id)
+                        )
+                    except Exception:
+                        logger.exception(
+                            "reconsume: inline follow-up failed for %s", doc_id
+                        )
+                else:
+                    full_consume_steps.delay(
+                        document_id=doc_id, task_row_id=_row_id(task_id)
+                    )
             except Exception:
                 # Never let the hook break the worker.
                 logger.exception("reconsume: hook failed (ignored)")
