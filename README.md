@@ -6,12 +6,13 @@ paperless-ngx's built-in *Reprocess* action only redoes OCR and rebuilds the arc
 
 This plugin fixes that. After every successful reprocess it automatically runs:
 
-1. **Date re-detection** from the OCR text — with a deterministic, **language-independent heuristic** that beats paperless' naive "first date wins" approach
+1. **Date re-detection** from the OCR text **and the file name** — with a deterministic, **language-independent heuristic** that beats paperless' naive "first date wins" approach
 2. **Classification / matching** — correspondent, document type, tags, storage path (same handlers the consumer uses)
 3. **Search index** update
 4. **Workflows** (`Document updated` by default)
 5. **UI cache** invalidation
-6. A **visible task entry** in the frontend *File tasks* view
+6. A **visible task entry** in the frontend *File tasks* view — walking the full *queued → started → finished* lifecycle (the minutes-long OCR shows as *started*, failures surface as *failed* instead of vanishing), with the same **open-document button** as native consume tasks and a compact **field diff** as its result
+7. **Live WebSocket progress events** on paperless' own `status_updates` channel, so the frontend refreshes during bulk runs instead of looking frozen
 
 All of it lives **completely outside the paperless source tree**. No core file is modified. Ever.
 
@@ -21,19 +22,21 @@ All of it lives **completely outside the paperless source tree**. No core file i
 
 ```
 "Reprocess" button (single or bulk)
-        │
+        │  celery before_task_publish  →  PaperlessTask row: PENDING ("queued" tab)
         ▼
 documents.tasks.update_document_content_maybe_archive_file   (paperless core, untouched)
-        │  celery task_postrun signal (stable Celery API)
+        │  celery task_prerun          →  row: STARTED (visible for the whole OCR)
+        │  celery task_postrun         →  on failure: row FAILURE + clear message
         ▼
-reconsume hook  ──►  reconsume.tasks.full_consume_steps
-                       ├─ 1. date from OCR text (scored heuristic)
+reconsume hook  ── runs INLINE (~1 s, same worker slot) ──►  full_consume_steps
+                       ├─ 1. date from OCR text + filename (scored heuristic)
                        ├─ 2. set_correspondent / set_document_type /
                        │      set_tags / set_storage_path
                        ├─ 3. add_to_index
                        ├─ 4. run_workflows (updated|added|none)
                        ├─ 5. clear document caches
-                       └─ 6. PaperlessTask row → visible in "File tasks"
+                       └─ 6. row: SUCCESS + field diff + open-document button;
+                              WebSocket push at every transition
 ```
 
 **Coupling to paperless internals is a single string** — the name of the core reprocess task. If a future paperless version renames it, the hook simply never fires; nothing breaks. Every pipeline step is individually wrapped in `try/except` (fail-soft): if an internal API changes, that step logs an error and the rest continues.
@@ -44,15 +47,24 @@ reconsume hook  ──►  reconsume.tasks.full_consume_steps
 
 paperless picks the **first** regex match in the document — which is frequently a birth date, a footer date, or a referenced old year. This plugin scores **every** date candidate instead, using only **structural, language-independent evidence** (no hardcoded keywords in any language):
 
-| Signal                                                                                           | Score                 |
-| ------------------------------------------------------------------------------------------------ | --------------------- |
-| `:` directly before the date (label syntax in any script: `Datum:`, `Date:`, `日付：`)           | +20                   |
-| `,` directly before (letter-head style `<City>, <date>`)                                         | +10                   |
-| Position in the first ~1200 chars (top of page 1)                                                | +20 (+10 more < 400)  |
-| Same calendar date repeated in the document                                                      | +10…+20               |
-| Embedded in a digit/spec blob (`AM4/1151/1150/1155` → phantom dates)                             | −40                   |
-| Partial date — month/year only, no explicit day (`11.2016`, `Oktober 2016`)                      | −10                   |
-| More than 6 years older than the newest clean date in the document (old references, birth dates) | −35                   |
+| Signal                                                                                              | Score                |
+| ---------------------------------------------------------------------------------------------------- | -------------------- |
+| `:` directly before the date (label syntax in any script: `Datum:`, `Date:`, `日付：`)              | +20                  |
+| `,` directly before (letter-head style `<City>, <date>`)                                            | +10                  |
+| `,` plus one short word (≤4 letters) before — `<City>, den <date>`, `<City>, le <date>`             | +10                  |
+| Position in the first ~1200 chars (top of page 1)                                                   | +20 (+10 more < 400) |
+| **Paragraph isolation** — the date sits in its own blank-line-delimited block                       | +35                  |
+| **Line isolation** — (nearly) alone on its text line inside a busy block, when no label already matched | +20              |
+| Deeply embedded in running prose (paragraph ≥300 extra chars)                                       | −10                  |
+| Distinct repetition **clusters** of the same date (nearby occurrences collapse into one)            | +10…+20              |
+| One-off date **preceding** the first occurrence of a dominant repeated date (year consistent with any strong filename date) | +40 |
+| Confirmed by a **strong filename date** (same day, or same year+month for a month-precision name)   | +35                  |
+| Digit/spec blob (`AM4/1151/1150/1155`), identifier-glued (`ISA-25.11.2017`), barcode-fenced (`*13.05.26*`), or **parenthesized** (`(Fassung Jan. 2015)`) | −40, excluded from repetition & anchor |
+| Full date whose day-of-month is **1** (`zum 01.10.2016` — effective/cut-off day prior)              | −15                  |
+| Partial date — month/year only, no explicit day (`11.2016`, `Oktober 2016`)                         | −10                  |
+| Bare year in date-shaped disguise (word+year whose "word" validated as not a month)                 | −25 more             |
+| More than 6 years older than the newest clean date in the document (old references)                 | −35                  |
+| More than 15 years older — birth-date territory                                                     | −60 more             |
 
 Partial dates resolve to the **last day of that month** (`Oktober 2016` → `2016-10-31`), calendar-aware including February and leap years (`Februar 2024` → `2024-02-29`). Whether a day is present is detected structurally (digit-group counting), not by language.
 
@@ -66,11 +78,11 @@ Partial dates resolve to the **last day of that month** (`Oktober 2016` → `201
 
 **Very old dates are crushed, not just discounted:** a date more than ~15 years older than the newest clean candidate in the document (birth-date territory) gets a decisive penalty — strong enough that even a weak, last-resort candidate elsewhere in the document will still beat a birth date, in a structured form where every field (including "Geburtsdatum") is individually well-formatted and isolated.
 
-**Barcode/reference-block dates are recognized as noise**, not just digit-glued ones: a date fenced by `*`/`#`/`|` characters (`*13.05.26*` inside a mail-barcode line) is excluded from competing at all, the same as a date glued directly to an identifier.
+**Barcode/reference-block and parenthesized dates are recognized as noise**, not just digit-glued ones: a date fenced by `*`/`#`/`|` characters (`*13.05.26*` inside a mail-barcode line) or immediately enclosed in parentheses (`(Fassung Jan. 2015)` form-version tags, law citations, period details) is excluded from competing at all — parentheses are the universal typographic marker for secondary information, never a document's own dateline.
 
 Candidate extraction combines paperless' own `DATE_REGEX` with a generic textual-date pattern (any unicode letters, generic day suffixes) so formats like `October 2nd, 2022` or `2. Oktober 2022` are found regardless of your OCR language. Parsing is done by [`dateparser`](https://github.com/scrapinghub/dateparser) — first with your configured paperless locale settings, then with full auto-detection (~200 languages) as fallback. Fully deterministic: same input → same output.
 
-Ties break by score, then by earliest position. If no candidate is found, the document's date is left untouched.
+Ties break by score, then filename candidates beat text candidates, then earliest position. If no candidate is found, the document's date is left untouched.
 
 ---
 
@@ -207,7 +219,7 @@ journalctl -u paperless-task-queue | grep reconsume
 You should see `reconsume.tasks.full_consume_steps` in the celery task list at boot. Then select any document → **Reprocess**. Within seconds the log shows:
 
 ```
-reconsume: reprocess of document 123 finished, queued full consume steps
+reconsume: reprocess of document 123 finished, running full consume steps
 reconsume doc 123: created 2025-11-08→2022-10-02 | corr ∅→"Gumroad, Inc." | type =Invoice | path =∅ | tags +tax | [idx wf:updated cache]
 ```
 
