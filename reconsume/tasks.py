@@ -35,6 +35,27 @@ def _flag(name, default):
     )
 
 
+def _push_progress(task_id, filename, status, message, current=100, max_=100):
+    """
+    Best-effort live nudge over paperless' own WebSocket channel
+    ("status_updates", the same one consume_file uses via ProgressManager
+    throughout its pipeline). The core reprocess task never sends any such
+    event, so — unlike normal consumption — the frontend has no push signal
+    at all during reprocessing; large bulk runs can look "frozen" for a long
+    time even though the backend is working fine. Fail-soft: any channel
+    layer / redis hiccup must never break the pipeline.
+    """
+    try:
+        from documents.plugins.helpers import ProgressManager, ProgressStatusOptions
+
+        with ProgressManager(filename, task_id) as mgr:
+            mgr.send_progress(
+                getattr(ProgressStatusOptions, status), message, current, max_
+            )
+    except Exception:
+        logger.debug("reconsume: progress push failed (ignored)", exc_info=True)
+
+
 def detect_date(document):
     """Return the re-detected created date (datetime.date) or None."""
     strategy = os.getenv("RECONSUME_DATE_STRATEGY", "heuristic").strip().lower()
@@ -70,16 +91,18 @@ def create_pending_task_row(task_id, document_id):
         from documents.models import Document, PaperlessTask
 
         document = Document.objects.get(pk=document_id)
+        filename = f"Reconsume: {document.title or document.pk}"
         row, _created = PaperlessTask.objects.get_or_create(
             task_id=task_id,
             defaults={
                 "task_name": PaperlessTask.TaskName.CONSUME_FILE,
                 "type": PaperlessTask.TaskType.AUTO,
                 "status": states.PENDING,
-                "task_file_name": f"Reconsume: {document.title or document.pk}",
+                "task_file_name": filename,
                 "owner": document.owner,
             },
         )
+        _push_progress(task_id, filename, "STARTED", "queued for reconsume", 0, 100)
         return row
     except Exception:
         logger.debug("reconsume: could not create PaperlessTask row", exc_info=True)
@@ -93,10 +116,13 @@ def mark_task_row_started(task_id):
         from django.utils import timezone
         from documents.models import PaperlessTask
 
-        PaperlessTask.objects.filter(task_id=task_id, status=states.PENDING).update(
-            status=states.STARTED,
-            date_started=timezone.now(),
-        )
+        row = PaperlessTask.objects.filter(task_id=task_id).first()
+        if row is None:
+            return
+        row.status = states.STARTED
+        row.date_started = timezone.now()
+        row.save(update_fields=["status", "date_started"])
+        _push_progress(task_id, row.task_file_name, "WORKING", "reprocessing (OCR)", 40, 100)
     except Exception:
         logger.debug("reconsume: could not mark row started", exc_info=True)
 
@@ -108,11 +134,14 @@ def fail_task_row(task_id, message):
         from django.utils import timezone
         from documents.models import PaperlessTask
 
-        PaperlessTask.objects.filter(task_id=task_id).update(
-            status=states.FAILURE,
-            date_done=timezone.now(),
-            result=message,
-        )
+        row = PaperlessTask.objects.filter(task_id=task_id).first()
+        if row is None:
+            return
+        row.status = states.FAILURE
+        row.date_done = timezone.now()
+        row.result = message
+        row.save(update_fields=["status", "date_done", "result"])
+        _push_progress(task_id, row.task_file_name, "FAILED", message)
     except Exception:
         logger.debug("reconsume: could not fail row", exc_info=True)
 
@@ -216,6 +245,7 @@ def _close_task_row(row, ok, result, document_id=None):
 
         row.status = states.SUCCESS if ok else states.FAILURE
         row.date_done = timezone.now()
+        push_message = result
         if ok and document_id is not None:
             # The frontend derives its "open document" button by matching
             # r"New document id (\d+) created" against the result — append
@@ -223,6 +253,12 @@ def _close_task_row(row, ok, result, document_id=None):
             result = f"{result}\nNew document id {document_id} created"
         row.result = result
         row.save(update_fields=["status", "date_done", "result"])
+        _push_progress(
+            row.task_id,
+            row.task_file_name,
+            "SUCCESS" if ok else "FAILED",
+            push_message,
+        )
     except Exception:
         logger.debug("reconsume: could not update PaperlessTask row", exc_info=True)
 
