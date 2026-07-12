@@ -14,12 +14,26 @@ structural evidence that works in any language and script:
        "日付：", "Fecha:") without naming any label word
   +10  ',' directly before               — letter-head style "<City>, <date>"
   +20  position < 1200 chars (top of page 1), +10 extra < 400
+  +35  paragraph isolation — the date sits in its own blank-line-delimited
+       block with little other content (see below)
+  -10  paragraph has a lot of OTHER content besides the date (deeply
+       embedded in running prose)
   +10..20  the same calendar date repeats in the document
   -40  match embedded in a digit/spec blob (e.g. "AM4/1151/1150/1155")
   -10  partial date (month/year only, no explicit day) — valid but weaker
        evidence than a full date; never serves as the recency anchor
   -35  more than 6 years older than the newest clean candidate in the
        document (references to old contracts, laws, birth dates)
+
+Paragraph isolation solves a specific failure mode: notification letters
+often restate an effective/deadline date ("...changes take effect on
+March 15, 2024...") several times in the body, while the letter's own
+dateline ("in March 2024" / "Berlin, 12 March 2024") appears exactly once,
+alone in the header. Naive frequency counting alone would let the repeated
+deadline outscore the true dateline. Isolation is measured purely by
+character count within the blank-line-delimited paragraph containing the
+match (paragraph length minus the match's own length) — no word lists, no
+language knowledge, just whitespace structure.
 
 Partial dates (month + year, no day — "11.2016", "Oktober 2016") resolve to
 the LAST day of that month via dateparser's PREFER_DAY_OF_MONTH="last",
@@ -112,6 +126,22 @@ def _iter_matches(text):
         yield m
 
 
+def _paragraph_extra_len(source, start, end):
+    """
+    Chars of "other" content in the blank-line-delimited paragraph
+    containing [start:end), besides the match itself. Purely structural:
+    counts characters between the nearest "\\n\\n" (or document boundary)
+    before and after the match — no words are read, so this works
+    identically regardless of language or script.
+    """
+    para_start = source.rfind("\n\n", 0, start)
+    para_start = 0 if para_start == -1 else para_start + 2
+    para_end = source.find("\n\n", end)
+    para_end = len(source) if para_end == -1 else para_end
+    paragraph_len = len(source[para_start:para_end].strip())
+    return max(0, paragraph_len - (end - start))
+
+
 def _candidates(text, parse_one):
     for m in _iter_matches(text):
         d = parse_one(m.group(0))
@@ -122,7 +152,8 @@ def _candidates(text, parse_one):
             noisy = (
                 prev_c.isdigit() or prev_c == "/" or next_c.isdigit() or next_c == "/"
             )
-            yield d, m.start(), noisy, not has_day(m.group(0))
+            extra_len = _paragraph_extra_len(text, m.start(), m.end())
+            yield d, m.start(), noisy, not has_day(m.group(0)), extra_len
 
 
 # Standalone 4-digit years ("Steuerbescheinigung 2019"). Only used as the
@@ -153,7 +184,9 @@ def _year_only_candidates(text):
         d = datetime.date(int(m.group(1)), 12, 31)
         if d.year <= 1900 or d > today:
             continue
-        yield d, m.start(), False, True  # never noisy (guarded by regex), partial
+        extra_len = _paragraph_extra_len(text, m.start(), m.end())
+        # never noisy (guarded by regex), partial
+        yield d, m.start(), False, True, extra_len
 
 
 def best_date(filename, text, parse_one):
@@ -166,35 +199,37 @@ def best_date(filename, text, parse_one):
     """
     text = text or ""
     cands = []
-    for d, pos, noisy, partial in _candidates(text, parse_one):
+    for d, pos, noisy, partial, extra_len in _candidates(text, parse_one):
         if isinstance(d, datetime.datetime):
             d = d.date()
-        cands.append((d, pos, noisy, partial))
+        cands.append((d, pos, noisy, partial, extra_len))
     # filename candidates count like very early text (paperless checks them too)
     if filename:
-        for d, _, noisy, partial in _candidates(filename, parse_one):
+        for d, _, noisy, partial, extra_len in _candidates(filename, parse_one):
             if isinstance(d, datetime.datetime):
                 d = d.date()
-            cands.append((d, 0, noisy, partial))
+            cands.append((d, 0, noisy, partial, extra_len))
 
     if not cands:
         # fallback tier: standalone past years -> Dec 31 of that year
         cands = list(_year_only_candidates(text))
         if not cands and filename:
-            cands = [(d, 0, n, p) for d, _, n, p in _year_only_candidates(filename)]
+            cands = [
+                (d, 0, n, p, e) for d, _, n, p, e in _year_only_candidates(filename)
+            ]
     if not cands:
         return None
 
     # Partial (month/year-only) and digit-noise matches never serve as the
     # recency anchor — they are weaker evidence.
-    clean = [d for d, _, noisy, partial in cands if not partial and not noisy]
-    newest = max(clean) if clean else max(d for d, _, _n, _p in cands)
+    clean = [d for d, _, noisy, partial, _e in cands if not partial and not noisy]
+    newest = max(clean) if clean else max(d for d, _, _n, _p, _e in cands)
     freq = {}
-    for d, _, _n, _p in cands:
+    for d, _, _n, _p, _e in cands:
         freq[d] = freq.get(d, 0) + 1
 
     scored = []
-    for d, pos, noisy, partial in cands:
+    for d, pos, noisy, partial, extra_len in cands:
         before = text[max(0, pos - 8) : pos].rstrip()
         score = 0
         if noisy:
@@ -208,6 +243,11 @@ def best_date(filename, text, parse_one):
             score += 20
         if pos < 400:
             score += 10
+        # paragraph isolation — structural, character-count only
+        if extra_len <= 40:
+            score += 35
+        elif extra_len >= 300:
+            score -= 10
         score += min(20, 10 * (freq[d] - 1))
         if partial:
             score -= 10
