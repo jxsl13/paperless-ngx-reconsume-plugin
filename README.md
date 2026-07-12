@@ -100,7 +100,7 @@ The official paperless-ngx image runs webserver, consumer, worker and scheduler 
 1. Clone this repository next to your `docker-compose.yml`:
 
    ```bash
-   git clone https://github.com/<you>/paperless-ngx-reconsume-plugin.git
+   git clone https://github.com/jxsl13/paperless-ngx-reconsume-plugin.git
    ```
 
 2. Add the mount and the environment variables to the `webserver` service:
@@ -138,7 +138,7 @@ For installs where paperless runs via systemd units (e.g. in a Proxmox LXC conta
 1. Clone the plugin **outside** the paperless source tree:
 
    ```bash
-   git clone https://github.com/<you>/paperless-ngx-reconsume-plugin.git /opt/paperless/plugins-repo
+   git clone https://github.com/jxsl13/paperless-ngx-reconsume-plugin.git /opt/paperless/plugins-repo
    ln -s /opt/paperless/plugins-repo/reconsume /opt/paperless/plugins/reconsume
    # or simply copy: mkdir -p /opt/paperless/plugins && cp -r /opt/paperless/plugins-repo/reconsume /opt/paperless/plugins/
    ```
