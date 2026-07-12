@@ -58,6 +58,16 @@ Partial dates resolve to the **last day of that month** (`Oktober 2016` → `201
 
 **Year-only fallback:** if no month/day candidate parses anywhere in the document or filename, standalone **past** years resolve to **Dec 31 of that year** — a yearly tax statement mentioning only `2019` gets `2019-12-31`. Multiple years compete through the same structural scoring (frequency, position). The current year is excluded, since its Dec 31 lies in the future.
 
+**Filename dates:** a structured filename (`2019.03.04_Shop.pdf`, `BAföG_2018_04-1.pdf`, `Abrechnung_08_2019.pdf`) is extracted deterministically as YMD — a leading 4-digit year fixes the field order without any locale guessing. A text-content date confirmed by a strong filename date gets a large bonus; scanner-timestamp-shaped filenames (`20250725_140140_006519`) are recognized and treated as weak, last-resort evidence only.
+
+**Repetition is cluster-aware, not a raw count:** occurrences of the same date within roughly 200 characters of each other collapse into one "cluster" — three adjacent line items restating the same date count as one piece of evidence, not three. This also feeds a **"precedes the dominant repeat" bonus**: a non-repeated date that appears earlier in the document than the first occurrence of a clearly dominant, repeated date gets a bonus — defending a letter's own one-off dateline against a deadline or effective-date phrase restated several times in the body (`"the changes take effect on March 15" ×5` should not outscore the letter's own header date, mentioned once).
+
+**Bare years in date-shaped disguise** (a word+year match whose "word" validates as NOT a real month — a coverage-period tag like `"für 2023"` used as a page watermark) are recognized and scored as weaker evidence than genuine month/day precision, so they only win when nothing better exists in the document (unlike a real Dec-31 fallback case, e.g. `"Lohnsteuerbescheinigung für 2016"` with no other date at all).
+
+**Very old dates are crushed, not just discounted:** a date more than ~15 years older than the newest clean candidate in the document (birth-date territory) gets a decisive penalty — strong enough that even a weak, last-resort candidate elsewhere in the document will still beat a birth date, in a structured form where every field (including "Geburtsdatum") is individually well-formatted and isolated.
+
+**Barcode/reference-block dates are recognized as noise**, not just digit-glued ones: a date fenced by `*`/`#`/`|` characters (`*13.05.26*` inside a mail-barcode line) is excluded from competing at all, the same as a date glued directly to an identifier.
+
 Candidate extraction combines paperless' own `DATE_REGEX` with a generic textual-date pattern (any unicode letters, generic day suffixes) so formats like `October 2nd, 2022` or `2. Oktober 2022` are found regardless of your OCR language. Parsing is done by [`dateparser`](https://github.com/scrapinghub/dateparser) — first with your configured paperless locale settings, then with full auto-detection (~200 languages) as fallback. Fully deterministic: same input → same output.
 
 Ties break by score, then by earliest position. If no candidate is found, the document's date is left untouched.
