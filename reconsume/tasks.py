@@ -207,7 +207,7 @@ def _diff_result(document_id, before, after, extras):
     )
 
 
-def _close_task_row(row, ok, result):
+def _close_task_row(row, ok, result, document_id=None):
     if row is None:
         return
     try:
@@ -216,6 +216,11 @@ def _close_task_row(row, ok, result):
 
         row.status = states.SUCCESS if ok else states.FAILURE
         row.date_done = timezone.now()
+        if ok and document_id is not None:
+            # The frontend derives its "open document" button by matching
+            # r"New document id (\d+) created" against the result — append
+            # the magic phrase so reconsume rows get the button too.
+            result = f"{result}\nNew document id {document_id} created"
         row.result = result
         row.save(update_fields=["status", "date_done", "result"])
     except Exception:
@@ -337,5 +342,5 @@ def full_consume_steps(self, document_id, task_row_id=None):
     after = _snapshot(Document.objects.get(pk=document_id))
     result = _diff_result(document_id, before, after, extras)
     logger.info("reconsume %s", result)
-    _close_task_row(task_row, ok=True, result=result)
+    _close_task_row(task_row, ok=True, result=result, document_id=document_id)
     return result
